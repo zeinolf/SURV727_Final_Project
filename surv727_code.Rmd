@@ -9,5 +9,4 @@ output: pdf_document
 library(rvest)
 library(tidyverse)
 library(dplyr)
-
 ```
