@@ -1,0 +1,13 @@
+---
+title: "surv727_code"
+author: "Zach Einolf"
+date: "2025-11-17"
+output: pdf_document
+---
+
+```{r}
+library(rvest)
+library(tidyverse)
+library(dplyr)
+
+```
