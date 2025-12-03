@@ -242,7 +242,7 @@ scrape_article <- function(url, source) {
         paste(collapse = "\n")
     }
   }
-
+#formatting tibble
   tibble(
     source = source,
     url = url,
