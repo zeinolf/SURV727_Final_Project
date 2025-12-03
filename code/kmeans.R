@@ -1,55 +1,44 @@
-#i dont use all of these but for ease of running i've just copy/pasted
-library(rvest)
-library(tidyverse)
-library(dplyr)
-library(purrr)
-library(xml2)
-library(httr)
-library(httr2)
-library(acled.api)
-library(readr)
-library(stringr)
-library(huggingfaceR)
 library(DBI)
 library(RSQLite)
-library(scales)
-library(ggplot2)
-library(fastDummies)
+library(dplyr)
+library(stringr)
+library(factoextra)
 
 #connecting to acled data db
 con <- dbConnect(SQLite(), "./data/ng_acled.db")
 ng_acled <- dbReadTable(con, "ng_acled")
 dbDisconnect(con)
 
-#doing some filtering
-test<- ng_acled %>%
+
+#filtering data to sub set
+acled_clean <- ng_acled %>%
   filter(!is.na(latitude), !is.na(longitude)) %>%
-  select(disorder_type, event_type, fatalities) %>%
   mutate(
-    fatalities = ifelse(is.na(fatalities), 0, fatalities),
-    disorder_type = as.numeric(as.factor(disorder_type)),
-    event_type = as.numeric(as.factor(event_type))
-  )|>
-  scale()
+    fatalities    = ifelse(is.na(fatalities), 0, fatalities),
+    disorder_type = as.factor(disorder_type),
+    event_type    = as.factor(event_type)
+  )
+
+#building a matrix to do k-means
+X_cat <- model.matrix(~ disorder_type + event_type - 1, data = acled_clean)
+X <- cbind(fatalities = acled_clean$fatalities, X_cat)
+#scaling
+X_scaled <- scale(X)
 
 #elbow plot
-fviz_nbclust(test, kmeans, method = "wss")
+fviz_nbclust(X_scaled, kmeans, method = "wss")
 
-#kmeans using k=3
+#chose 7, running k-means
 set.seed(100)
-k_final <- kmeans(test, centers = 3, nstart = 25)
+k_final <- kmeans(X_scaled, centers = 7, nstart = 25)
 
-#adding clusters back to original data
-acled_clustered <- ng_acled |>
-  filter(!is.na(latitude), !is.na(longitude)) |>
+#adding clusters back to data
+acled_clustered <- acled_clean %>%
   mutate(
-    cluster   = factor(k_final$cluster),
-    disorder_type = as.factor(disorder_type),
-    event_type    = as.factor(event_type),
-    fatalities    = ifelse(is.na(fatalities), 0, fatalities),
-    actor1 = str_to_lower(actor1),
-    actor2 = str_to_lower(actor2),
-    boko_flag = case_when(
+    cluster    = factor(k_final$cluster),
+    actor1     = str_to_lower(actor1),
+    actor2     = str_to_lower(actor2),
+    boko_flag  = case_when(
       str_detect(actor1, "boko haram") | str_detect(actor2, "boko haram") ~ "Boko Haram",
       TRUE ~ "Other"
     )
