@@ -1,12 +1,10 @@
 #i dont use all of these but for ease of running i've just copy/pasted
-library(rvest)
 library(tidyverse)
 library(dplyr)
 library(purrr)
 library(xml2)
 library(httr)
 library(httr2)
-library(acled.api)
 library(readr)
 library(stringr)
 library(huggingfaceR)
@@ -73,26 +71,6 @@ emotion_long <- map2_dfr(
     article_data_id |> 
       select(doc_id, pub_date_raw, source, title), by = "doc_id"
   )
-
-#cleaning and formatting
-emotion_time <- emotion_long |>
-  mutate(
-    date  = suppressWarnings(mdy(pub_date_raw)),
-    month = floor_date(date, unit = "month")
-  ) |>
-  filter(!is.na(month), !is.na(label)) |>
-  group_by(month, label) |>
-  summarize(
-    mean_score = mean(score, na.rm = TRUE),
-    n_articles = n_distinct(doc_id),
-    .groups    = "drop"
-  )
-
-
-#writing to a new db
-con <- dbConnect(SQLite(), "./data/emotion_time.db")
-dbWriteTable(con, "emotion_time", emotion_time, overwrite = TRUE)
-dbDisconnect(con)
 
 
 con <- dbConnect(SQLite(), "./data/emotion_long.db")
