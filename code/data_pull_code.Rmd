@@ -1,0 +1,292 @@
+---
+title: "Data Pull Code"
+author: "Zach Einolf"
+date: "2025-11-17"
+output: pdf_document
+---
+
+```{r, include= FALSE}
+library(rvest)
+library(tidyverse)
+library(dplyr)
+library(purrr)
+library(xml2)
+library(httr)
+library(httr2)
+library(acled.api)
+library(readr)
+library(stringr)
+library(huggingfaceR)
+library(DBI)
+library(RSQLite)
+library(scales)
+library(ggplot2)
+library(fastDummies)
+```
+
+ACLED Pull
+```{r, cache=TRUE}
+#API website
+base_url <- "https://acleddata.com/api/acled/read"
+token <- read_file("access_token.txt") #if you want to recreate, map to your access token
+
+#API pull from ACLED
+resp <- GET(url = base_url,
+            query = list(`_format` = "csv",
+                         country = "Nigeria",
+                         event_date = "2019-01-01|2021-12-31",
+                         event_date_where = "BETWEEN",
+                         limit = 0),
+            add_headers(Authorization = paste("Bearer", token))
+            )
+
+stop_for_status(resp)
+
+
+#Formatting into csv
+csv_txt <- content(resp, as = "text", encoding = "UTF-8")
+ng_acled <- read_csv(csv_txt, show_col_types = FALSE)
+
+ng_acled <- ng_acled|>
+  mutate(event_date=as.character(event_date))
+
+#writing the scraped data into a SQL db
+con <- dbConnect(SQLite(), "../data/ng_acled.db")
+dbWriteTable(con, "ng_acled.db", ng_acled, overwrite = TRUE)
+dbDisconnect(con)
+
+```
+
+
+
+News Scraper Set up
+```{r, cache = TRUE}
+#setting some parameters
+query <- "boko haram"
+max_pages <- 20
+
+trim <- function(x) sub("/+$", "", x)
+
+#creating a function to report if the scraper runs into any timeout/cloudfare issues
+grab_html <- function(url) {
+  resp <- try(
+    GET(url, user_agent("rvest project scraper"), timeout(20)),
+    silent = TRUE
+  )
+  if (inherits(resp, "try-error") || status_code(resp) != 200) return(NULL)
+  page <- try(read_html(resp), silent = TRUE)
+  if (inherits(page, "try-error")) return(NULL)
+  page
+}
+
+#the key part that is extracting boko haram related links from the searched pages
+extract_article_links <- function(page) {
+  if (is.null(page)) return(character(0))
+  page |>
+    html_elements("h2 a, h3 a, .entry-title a, .post-title a") |>
+    html_attr("href") |>
+    na.omit() |>
+    unique()
+}
+```
+
+
+Informant24/7 Link Grabber
+```{r, cache = TRUE}
+#specific code that sets up the link grabber for the Informant24/7 source
+get_informant_results <- function(query, max_pages = 20) {
+  base <- "https://theinformant247.com"
+  links_all <- character(0)
+
+  for (p in 1:max_pages) {
+    q <- URLencode(query, reserved = TRUE)
+    url <- paste0(
+      trim(base),
+      "/?s=", q,
+      if (p > 1) paste0("&paged=", p) else ""
+    )
+    message("Pulling links from: ", url)
+    page <- grab_html(url)
+    links <- extract_article_links(page)
+    if (length(links) == 0) break
+    links_all <- union(links_all, links)
+  }
+  tibble(
+    source = base,
+    article_url = links_all
+  )
+}
+```
+
+
+MegaNews Link Grabber
+```{r, cache = TRUE}
+#specific code that sets up the link grabber for the MegaNews source
+
+get_meganews_results <- function() {
+  base_tag <- "https://meganews.com.ng/tag/boko-haram"
+  links_all <- character(0)
+
+  for (p in 1:max_pages) {
+    url <- if (p == 1) {
+      paste0(base_tag, "/")
+    } else {
+      paste0(base_tag, "/page/", p, "/")
+    }
+    message("Pulling links from: ", url)
+    page <- grab_html(url)
+    links <- extract_article_links(page)
+    if (length(links) == 0) break
+    links_all <- union(links_all, links)
+  }
+  tibble(
+    source = "https://meganews.com.ng",
+    article_url = links_all
+  )
+}
+```
+
+
+NewsHunter Link Grabber
+```{r, cache = TRUE}
+#specific code that sets up the link grabber for the NewsHunter source
+
+get_newshunter_results <- function() {
+  tag_urls <- c(
+    "https://thenewshunterblog.wordpress.com/tag/boko-haram/",
+    "https://thenewshunterblog.wordpress.com/tag/boko-haram-2/"
+  )
+  map_dfr(tag_urls, function(u) {
+    message("Pulling links from: ", u)
+    page <- grab_html(u)
+    links <- extract_article_links(page)
+    tibble(
+      source = "https://thenewshunterblog.wordpress.com",
+      article_url = links
+    )
+  }) |>
+    distinct()
+}
+```
+
+
+Link Scraper Set-up
+```{r, cache = TRUE}
+
+#this function is setting up the scraper for the three news sources
+scrape_article <- function(url, source) {
+  message("Scraping article: ", url)
+
+  page <- grab_html(url)
+  if (is.null(page)) {
+    return(tibble(
+      source = source,
+      url = url,
+      title = NA_character_,
+      pub_date_raw = NA_character_,
+      text = NA_character_
+    ))
+  }
+  title <- NA_character_
+  pub_date_raw <- NA_character_
+  text <- NA_character_
+
+  #set up for scraping the informant24/7 links
+  if (grepl("theinformant247.com", source, fixed = TRUE)) {
+    title_node <- html_element(page, "h1, .entry-title")
+    if (length(title_node) > 0) title <- html_text2(title_node)
+    date_node <- html_element(page, "time, .entry-date, .post-date, .post-meta time")
+    if (length(date_node) > 0) pub_date_raw <- html_text2(date_node)
+    body_nodes <- html_elements(page, "article p, .entry-content p, .post-content p, .post p")
+    if (length(body_nodes) > 0) {
+      text <- body_nodes |>
+        html_text2() |>
+        paste(collapse = "\n")
+    }
+    
+  #set up for scraping the meganews links
+  } else if (grepl("meganews.com.ng", source, fixed = TRUE)) {
+    title_node <- html_element(page, ".td-post-title .entry-title")
+    if (length(title_node) > 0) title <- html_text2(title_node)
+    date_node <- html_element(page, ".td-module-date")
+    if (length(date_node) > 0) pub_date_raw <- html_text2(date_node)
+    body_nodes <- html_elements(page, "article p, .entry-content p, .post-content p, .post p")
+    if (length(body_nodes) > 0) {
+      text <- body_nodes |>
+        html_text2() |>
+        paste(collapse = "\n")
+    }
+
+  #set up for scraping the newshunter links
+  } else if (grepl("thenewshunterblog.wordpress.com", source, fixed = TRUE)) {
+    title_node <- html_element(page, "h1, .entry-title")
+    if (length(title_node) > 0) title <- html_text2(title_node)
+    date_node <- html_element(page, ".post-meta-date a")
+    if (length(date_node) > 0) pub_date_raw <- html_text2(date_node)
+    body_nodes <- html_elements(page, ".post-content > p")
+    if (length(body_nodes) > 0) {
+      text <- body_nodes |>
+        html_text2() |>
+        paste(collapse = "\n")
+    }
+
+  } else {
+    title_node <- html_element(page, "h1, .entry-title")
+    if (length(title_node) > 0) title <- html_text2(title_node)
+    date_node <- html_element(page, "time, .entry-date, .post-date, .post-meta time")
+    if (length(date_node) > 0) pub_date_raw <- html_text2(date_node)
+    body_nodes <- html_elements(page, "article p, .entry-content p, .post-content p, .post p")
+    if (length(body_nodes) > 0) {
+      text <- body_nodes |>
+        html_text2() |>
+        paste(collapse = "\n")
+    }
+  }
+
+  tibble(
+    source = source,
+    url = url,
+    title = title,
+    pub_date_raw = pub_date_raw,
+    text = text
+  )
+}
+```
+
+
+Running Scraping function
+```{r, cache = TRUE}
+results_informant   <- get_informant_results(query, max_pages) #scraping informant for links
+results_meganews    <- get_meganews_results() #scraping meganews for links
+results_newshunter  <- get_newshunter_results() #scraping newshunter for links
+
+search_results <- bind_rows( #binding all the links together
+  results_informant,
+  results_meganews,
+  results_newshunter
+) |>
+  distinct()
+
+article_data <- pmap_dfr( #scraping all of the links using the function from last section
+  list(
+    url    = search_results$article_url,
+    source = search_results$source
+  ),
+  ~ scrape_article(..1, ..2)
+)
+
+article_data |> #quickview of the result
+  select(source, title, pub_date_raw) |>
+  head()
+
+
+#writing the scraped data into a SQL db
+con <- dbConnect(SQLite(), "nigeria_news.db")
+dbWriteTable(con, "nigeria_news", article_data, overwrite = TRUE)
+dbDisconnect(con)
+
+```
+
+
+
+
